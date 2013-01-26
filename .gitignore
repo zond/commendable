@@ -23,3 +23,6 @@ _testmain.go
 
 127.0.0.1:*
 *.swp
+commendable_cli/commendable_cli
+commendable_server/commendable_server
+
