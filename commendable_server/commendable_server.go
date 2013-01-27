@@ -16,7 +16,9 @@ import (
 )
 
 const (
-  address = "address"
+  address        = "address"
+  bufferSize     = 2048
+  maxMessageSize = 8192
 )
 
 var activeObjectsKey = []byte("COMMENDABLE_ACTIVE_OBJECTS")
@@ -38,14 +40,11 @@ func likesKey(id string) []byte {
   return []byte(fmt.Sprintf("%v_LIKES", id))
 }
 
-func handleUDP(udpConn *net.UDPConn, c *client.Conn) {
-  bytes := make([]byte, 8192)
-  var read int
+func handleUDP(ch chan []byte, c *client.Conn) {
   var err error
   var mess common.Message
-  read, err = udpConn.Read(bytes)
-  for err == nil {
-    err = json.Unmarshal(bytes[:read], &mess)
+  for bytes := range ch {
+    err = json.Unmarshal(bytes, &mess)
     if err != nil {
       panic(err)
     }
@@ -78,6 +77,16 @@ func handleUDP(udpConn *net.UDPConn, c *client.Conn) {
       // Remote the object id from the active objects
       c.SubDel(activeObjectsKey, []byte(mess.Object))
     }
+  }
+}
+
+func receiveUDP(udpConn *net.UDPConn, ch chan []byte) {
+  bytes := make([]byte, maxMessageSize)
+  var read int
+  var err error
+  read, err = udpConn.Read(bytes)
+  for err == nil {
+    ch <- bytes[:read]
     read, err = udpConn.Read(bytes)
   }
 }
@@ -91,7 +100,9 @@ func setupUDPService(c *client.Conn) {
   if err != nil {
     panic(err)
   }
-  go handleUDP(udpConn, c)
+  ch := make(chan []byte, bufferSize)
+  go receiveUDP(udpConn, ch)
+  go handleUDP(ch, c)
 }
 
 func getRecommendations(w http.ResponseWriter, r *http.Request, c *client.Conn) {
@@ -185,6 +196,7 @@ func main() {
   }
 
   c := client.MustConn(s.GetAddr())
+  c.Start()
 
   setupUDPService(c)
   setupJSONService(c)
