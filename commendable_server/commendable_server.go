@@ -112,31 +112,79 @@ func getRecommendations(w http.ResponseWriter, r *http.Request, c *client.Conn) 
   if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
     panic(err)
   }
-  // Create a set operation that returns the union of the likers of all objects we have liked, just returning the user key.
+  // Create a set operation that returns the union of the likers of all objects we have liked, just returning the user key
   likersOp := &setop.SetOp{
     Merge: setop.First,
     Type:  setop.Union,
   }
-  // For each object we have liked, add the likers of that flavor as a source to the union of likers.
+  // For each object we have liked, add the likers of that flavor as a source to the union of likers
   for _, obj := range c.Slice(likesKey(uid), nil, nil, true, true) {
-    fmt.Printf("%v likes %v, adding everyone who does to sources\n", uid, string(obj.Key))
     likersOp.Sources = append(likersOp.Sources, setop.SetOpSource{Key: likesKey(string(obj.Key))})
   }
-  // Create a set operation that returns the union of the liked objects of all likers of all objects we have liked, returning the sum of the like weights.
+  // Create a set operation that returns the union of the liked objects of all likers of all objects we have liked, returning the sum of the like weights
   objectsOp := &setop.SetOp{
     Merge: setop.FloatSum,
     Type:  setop.Union,
   }
-  // For each user in the union of users having liked something we like, add the objects they have liked as a source to the union of objects.
+  // For each user in the union of users having liked something we like, add the objects they have liked as a source to the union of objects
   for _, user := range c.SetExpression(setop.SetExpression{
     Op: likersOp,
   }) {
     if string(user.Key) != uid {
-      fmt.Printf("%v likes something that %v likes, adding everything hen likes to sources\n", string(user.Key), uid)
       objectsOp.Sources = append(objectsOp.Sources, setop.SetOpSource{Key: likesKey(string(user.Key))})
     }
   }
-  // designate a sub tree to dump the liked objects in.
+  // If the request wanted us to do something with the objects already viewed by the user
+  if request.Viewed != "" {
+    var opType setop.SetOpType
+    // Select the appropriate operation
+    if request.Viewed == common.Intersect {
+      opType = setop.Intersection
+    } else if request.Viewed == common.Reject {
+      opType = setop.Difference
+    } else {
+      panic(fmt.Errorf("%v is not a valid value for Viewed", request.Viewed))
+    }
+    // Create a new set operation doing the appropriate thing on the set of recommendations
+    objectsOp = &setop.SetOp{
+      Merge: setop.First,
+      Type:  opType,
+      Sources: []setop.SetOpSource{
+        setop.SetOpSource{
+          SetOp: objectsOp,
+        },
+        setop.SetOpSource{
+          Key: viewsKey(uid),
+        },
+      },
+    }
+  }
+  // If the request wanted us to do something with the active objects
+  if request.Actives != "" {
+    var opType setop.SetOpType
+    // Select the appropriate operation
+    if request.Actives == common.Intersect {
+      opType = setop.Intersection
+    } else if request.Actives == common.Reject {
+      opType = setop.Difference
+    } else {
+      panic(fmt.Errorf("%v is not a valid value for Actives", request.Actives))
+    }
+    // Create a new set operation doing the appropriate thing on the set of recommendations
+    objectsOp = &setop.SetOp{
+      Merge: setop.First,
+      Type:  opType,
+      Sources: []setop.SetOpSource{
+        setop.SetOpSource{
+          SetOp: objectsOp,
+        },
+        setop.SetOpSource{
+          Key: activeObjectsKey,
+        },
+      },
+    }
+  }
+  // designate a sub tree to dump the liked objects in
   dumpkey := []byte(fmt.Sprintf("%v_RECOMMENDED", uid))
   // make it mirrored
   c.SubAddConfiguration(dumpkey, "mirrored", "yes")
