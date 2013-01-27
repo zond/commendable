@@ -1,20 +1,29 @@
 package common
 
 const (
-  Like      = "like"
-  View      = "view"
-  Destroy   = "destroy"
-  Recommend = "recommend"
-  Views     = "views"
-  Likes     = "likes"
-  Actives   = "actives"
+  Like       = "like"
+  View       = "view"
+  Deactivate = "deactivate"
+  Recommend  = "recommend"
+  Views      = "views"
+  Likes      = "likes"
+  Actives    = "actives"
+
+  Reject    = "reject"
+  Intersect = "intersect"
 )
 
-var Commands = []string{Like, View, Destroy, Recommend, Views, Likes, Actives}
+var Commands = []string{Like, View, Deactivate, Recommend, Views, Likes, Actives}
 
 type Message struct {
   Type   string  `json:",omitempty"`
   User   string  `json:",omitempty"`
   Object string  `json:",omitempty"`
   Weight float64 `json:",omitempty"`
+}
+
+type RecommendationsRequest struct {
+  Num     int
+  Actives string
+  Viewed  string
 }

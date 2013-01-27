@@ -1,10 +1,12 @@
 package main
 
 import (
+  "bytes"
   "encoding/json"
   "flag"
   "fmt"
   "github.com/zond/commendable/common"
+  "io"
   "net"
   "net/http"
 )
@@ -16,6 +18,9 @@ var command = flag.String("cmd", "", fmt.Sprintf("Command to execute. One of %v.
 var userId = flag.String("uid", "", "User id that likes or views or needs a recommendation.")
 var objectId = flag.String("oid", "", "Object id that is liked or viewed or destroyed.")
 var weight = flag.Float64("weight", 1, "Amount of liking being done.")
+var actives = flag.String("actives", "", fmt.Sprintf("How to treat active objects. Either %v the results with them, or %v them completely.", common.Intersect, common.Reject))
+var viewed = flag.String("viewed", "", fmt.Sprintf("How to treat viewed objects. Either %v the results with them, or %v them completely.", common.Intersect, common.Reject))
+var num = flag.Int("num", 16, "How many recommendations to provide, at most.")
 
 func getUDPConn() *net.UDPConn {
   udpAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%v:%v", *ip, *udpPort))
@@ -44,14 +49,9 @@ func sendUDP(o interface{}) {
   }
 }
 
-func httpGet(path string) string {
-  client := new(http.Client)
-  resp, err := client.Get(fmt.Sprintf("http://%v:%v/%v", *ip, *jsonPort, path))
-  if err != nil {
-    panic(err)
-  }
+func decode(r io.Reader) string {
   var result interface{}
-  err = json.NewDecoder(resp.Body).Decode(&result)
+  err := json.NewDecoder(r).Decode(&result)
   if err != nil {
     panic(err)
   }
@@ -60,6 +60,28 @@ func httpGet(path string) string {
     panic(err)
   }
   return string(bytes)
+}
+
+func httpGet(path string) string {
+  client := new(http.Client)
+  resp, err := client.Get(fmt.Sprintf("http://%v:%v/%v", *ip, *jsonPort, path))
+  if err != nil {
+    panic(err)
+  }
+  return decode(resp.Body)
+}
+
+func httpPost(path string, obj interface{}) string {
+  client := new(http.Client)
+  body := new(bytes.Buffer)
+  if err := json.NewEncoder(body).Encode(obj); err != nil {
+    panic(err)
+  }
+  resp, err := client.Post(fmt.Sprintf("http://%v:%v/%v", *ip, *jsonPort, path), "application/json; charset=UTF-8", body)
+  if err != nil {
+    panic(err)
+  }
+  return decode(resp.Body)
 }
 
 func main() {
@@ -85,12 +107,12 @@ func main() {
         Object: *objectId,
       })
     }
-  } else if *command == common.Destroy {
+  } else if *command == common.Deactivate {
     if *objectId == "" {
       flag.PrintDefaults()
     } else {
       sendUDP(common.Message{
-        Type:   common.Destroy,
+        Type:   common.Deactivate,
         Object: *objectId,
       })
     }
@@ -98,7 +120,11 @@ func main() {
     if *userId == "" {
       flag.PrintDefaults()
     } else {
-      fmt.Println(httpGet(fmt.Sprintf("%v/%v", common.Recommend, *userId)))
+      fmt.Println(httpPost(fmt.Sprintf("%v/%v", common.Recommend, *userId), common.RecommendationsRequest{
+        Num:     *num,
+        Actives: *actives,
+        Viewed:  *viewed,
+      }))
     }
   } else if *command == common.Views {
     if *userId == "" {

@@ -9,6 +9,7 @@ import (
   "github.com/zond/god/client"
   godCommon "github.com/zond/god/common"
   "github.com/zond/god/dhash"
+  "github.com/zond/god/setop"
   "net"
   "net/http"
   "runtime"
@@ -73,7 +74,7 @@ func handleUDP(ch chan []byte, c *client.Conn) {
       c.SubPut(likesKey(mess.Object), []byte(mess.User), nil)
       // Make the object id active
       c.SubPut(activeObjectsKey, []byte(mess.Object), nil)
-    } else if mess.Type == common.Destroy {
+    } else if mess.Type == common.Deactivate {
       // Remote the object id from the active objects
       c.SubDel(activeObjectsKey, []byte(mess.Object))
     }
@@ -106,8 +107,54 @@ func setupUDPService(c *client.Conn) {
 }
 
 func getRecommendations(w http.ResponseWriter, r *http.Request, c *client.Conn) {
+  uid := mux.Vars(r)["user_id"]
+  var request common.RecommendationsRequest
+  if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+    panic(err)
+  }
+  // Create a set operation that returns the union of the likers of all objects we have liked, just returning the user key.
+  likersOp := &setop.SetOp{
+    Merge: setop.First,
+    Type:  setop.Union,
+  }
+  // For each object we have liked, add the likers of that flavor as a source to the union of likers.
+  for _, obj := range c.Slice(likesKey(uid), nil, nil, true, true) {
+    fmt.Printf("%v likes %v, adding everyone who does to sources\n", uid, string(obj.Key))
+    likersOp.Sources = append(likersOp.Sources, setop.SetOpSource{Key: likesKey(string(obj.Key))})
+  }
+  // Create a set operation that returns the union of the liked objects of all likers of all objects we have liked, returning the sum of the like weights.
+  objectsOp := &setop.SetOp{
+    Merge: setop.FloatSum,
+    Type:  setop.Union,
+  }
+  // For each user in the union of users having liked something we like, add the objects they have liked as a source to the union of objects.
+  for _, user := range c.SetExpression(setop.SetExpression{
+    Op: likersOp,
+  }) {
+    if string(user.Key) != uid {
+      fmt.Printf("%v likes something that %v likes, adding everything hen likes to sources\n", string(user.Key), uid)
+      objectsOp.Sources = append(objectsOp.Sources, setop.SetOpSource{Key: likesKey(string(user.Key))})
+    }
+  }
+  // designate a sub tree to dump the liked objects in.
+  dumpkey := []byte(fmt.Sprintf("%v_RECOMMENDED", uid))
+  // make it mirrored
+  c.SubAddConfiguration(dumpkey, "mirrored", "yes")
+  // make sure we clean up after ourselves
+  defer c.SubClear(dumpkey)
+  c.SetExpression(setop.SetExpression{
+    Op:   objectsOp,
+    Dest: dumpkey,
+  })
+  var result []common.Message
+  for _, item := range c.MirrorReverseSliceLen(dumpkey, nil, true, request.Num) {
+    result = append(result, common.Message{
+      Object: string(item.Value),
+      Weight: godCommon.MustDecodeFloat64(item.Key),
+    })
+  }
   w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-  if err := json.NewEncoder(w).Encode("hepp!"); err != nil {
+  if err := json.NewEncoder(w).Encode(result); err != nil {
     panic(err)
   }
 }
@@ -166,7 +213,7 @@ func setupJSONService(c *client.Conn) {
     panic(err)
   }
   router := mux.NewRouter()
-  router.Methods("GET").Path(fmt.Sprintf("/%v/{user_id}", common.Recommend)).HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+  router.Methods("POST").Path(fmt.Sprintf("/%v/{user_id}", common.Recommend)).HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
     getRecommendations(w, r, c)
   })
   router.Methods("GET").Path(fmt.Sprintf("/%v/{user_id}", common.Views)).HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
