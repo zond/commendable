@@ -134,6 +134,19 @@ func getRecommendations(w http.ResponseWriter, r *http.Request, c *client.Conn) 
       objectsOp.Sources = append(objectsOp.Sources, setop.SetOpSource{Key: likesKey(string(user.Key))})
     }
   }
+  // Filter out whatever the user alread likes
+  objectsOp = &setop.SetOp{
+    Merge: setop.First,
+    Type:  setop.Difference,
+    Sources: []setop.SetOpSource{
+      setop.SetOpSource{
+        SetOp: objectsOp,
+      },
+      setop.SetOpSource{
+        Key: likesKey(uid),
+      },
+    },
+  }
   // If the request wanted us to do something with the objects already viewed by the user
   if request.Viewed != "" {
     var opType setop.SetOpType
