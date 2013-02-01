@@ -63,17 +63,29 @@ func handleUDP(ch chan []byte, c *client.Conn) {
       c.SubPut(vKey, []byte(mess.Object), encT)
       // Create an encoded timestamp for something older than timeout
       tooOld := time.Now().Add(-time.Hour * 24 * time.Duration((*timeout))).UnixNano()
-      // Delete all entries with timestamp older than that
+      // Delete all viewed entries with timestamp older than that
       for _, item := range c.MirrorSlice(vKey, nil, godCommon.EncodeInt64(tooOld), true, true) {
         c.SubDel(vKey, item.Value)
+      }
+      // Delete all active entries with timestamp older than that
+      for _, item := range c.MirrorSlice(activeObjectsKey, nil, godCommon.EncodeInt64(tooOld), true, true) {
+        c.SubDel(activeObjectsKey, item.Value)
       }
     } else if mess.Type == common.Like {
       // Record the liked object under user
       c.SubPut(likesKey(mess.User), []byte(mess.Object), godCommon.EncodeFloat64(mess.Weight))
       // Record the liker under the liked object
       c.SubPut(likesKey(mess.Object), []byte(mess.User), nil)
-      // Make the object id active
-      c.SubPut(activeObjectsKey, []byte(mess.Object), nil)
+      if !mess.DontActivate {
+        // Make the object id active
+        c.SubPut(activeObjectsKey, []byte(mess.Object), nil)
+      }
+      // Create an encoded timestamp for something older than timeout
+      tooOld := time.Now().Add(-time.Hour * 24 * time.Duration((*timeout))).UnixNano()
+      // Delete all active entries with timestamp older than that
+      for _, item := range c.MirrorSlice(activeObjectsKey, nil, godCommon.EncodeInt64(tooOld), true, true) {
+        c.SubDel(activeObjectsKey, item.Value)
+      }
     } else if mess.Type == common.Deactivate {
       // Remote the object id from the active objects
       c.SubDel(activeObjectsKey, []byte(mess.Object))

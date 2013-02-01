@@ -16,10 +16,11 @@ const (
 var Commands = []string{Like, View, Deactivate, Recommend, Views, Likes, Actives}
 
 type Message struct {
-  Type   string  `json:",omitempty"`
-  User   string  `json:",omitempty"`
-  Object string  `json:",omitempty"`
-  Weight float64 `json:",omitempty"`
+  Type         string  `json:",omitempty"`
+  User         string  `json:",omitempty"`
+  Object       string  `json:",omitempty"`
+  Weight       float64 `json:",omitempty"`
+  DontActivate bool    `json:",omitempty"`
 }
 
 type RecommendationsRequest struct {
