@@ -18,11 +18,12 @@ import (
 
 const (
   address        = "address"
-  bufferSize     = 2048
+  bufferSize     = 1024 * 1024
   maxMessageSize = 8192
 )
 
 var activeObjectsKey = []byte("COMMENDABLE_ACTIVE_OBJECTS")
+var changedUsersKey = []byte("COMMENDABLE_CHANGED_USERS")
 
 var ip = flag.String("ip", "127.0.0.1", "IP address to listen to.")
 var port = flag.Int("port", 9191, "Port to listen to for cluster net/rpc connections. The next port will be used for the database admin HTTP service.")
@@ -41,7 +42,19 @@ func likesKey(id string) []byte {
   return []byte(fmt.Sprintf("%v_LIKES", id))
 }
 
-func handleUDP(ch chan []byte, c *client.Conn) {
+func updateRecommendations(c *client.Conn, queueSize *int32) {
+  var uidB []byte
+  var tsB []byte
+  for {
+    for atomic.LoadInt32(queueSize) > 0 || c.SubSize(changedUsersKey) == 0 {
+      time.Sleep(time.Second)
+    }
+    tsB, uidB = c.First(changedUsersKey)
+    c.SubDel(changedUsersKey, tsB)
+  }
+}
+
+func handleUDP(ch chan []byte, c *client.Conn, queueSize *int32) {
   var err error
   var mess common.Message
   for bytes := range ch {
@@ -84,6 +97,7 @@ func handleUDP(ch chan []byte, c *client.Conn) {
         for _, item := range c.MirrorSlice(activeObjectsKey, nil, godCommon.EncodeInt64(tooOld), true, true) {
           c.SubDel(activeObjectsKey, item.Value)
         }
+        c.SubPut(changedUsersKey, godCommon.EncodeInt64(time.Now().UnixNano()), []byte(mess.User))
       } else if mess.Type == common.Deactivate {
         // Remote the object id from the active objects
         c.SubDel(activeObjectsKey, []byte(mess.Object))
@@ -91,13 +105,15 @@ func handleUDP(ch chan []byte, c *client.Conn) {
     } else {
       fmt.Printf("When parsing %v: %v\n", string(bytes), err)
     }
+    atomic.AddUint32(queueSize, -1)
   }
 }
 
-func receiveUDP(udpConn *net.UDPConn, ch chan []byte) {
+func receiveUDP(udpConn *net.UDPConn, ch chan []byte, queueSize *int32) {
   bytes := make([]byte, maxMessageSize)
   read, err := udpConn.Read(bytes)
   for err == nil {
+    atomic.AddUint32(queueSize, 1)
     ch <- bytes[:read]
     bytes = make([]byte, maxMessageSize)
     read, err = udpConn.Read(bytes)
@@ -114,8 +130,10 @@ func setupUDPService(c *client.Conn) {
     panic(err)
   }
   ch := make(chan []byte, bufferSize)
-  go receiveUDP(udpConn, ch)
-  go handleUDP(ch, c)
+  var queueSize int32
+  go receiveUDP(udpConn, ch, &queueSize)
+  go handleUDP(ch, c, &queueSize)
+  go updateRecommendations(c, &queueSize)
 }
 
 func getRecommendations(w http.ResponseWriter, r *http.Request, c *client.Conn) {
