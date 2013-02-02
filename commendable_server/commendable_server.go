@@ -14,6 +14,7 @@ import (
   "net"
   "net/http"
   "runtime"
+  "sync/atomic"
   "time"
 )
 
@@ -50,12 +51,16 @@ func oLikesKey(id string) []byte {
 func updateRecommendations(c *client.Conn, queueSize *int32) {
   var uidB []byte
   var tsB []byte
+  var existed bool
   for {
     for atomic.LoadInt32(queueSize) > 0 || c.SubSize(changedUsersKey) == 0 {
       time.Sleep(time.Second)
     }
-    tsB, uidB = c.First(changedUsersKey)
-    c.SubDel(changedUsersKey, tsB)
+    tsB, uidB, existed = c.First(changedUsersKey)
+    if existed {
+      fmt.Println("updating the recommendations for", string(uidB))
+      c.SubDel(changedUsersKey, tsB)
+    }
   }
 }
 
@@ -110,7 +115,7 @@ func handleUDP(ch chan []byte, c *client.Conn, queueSize *int32) {
     } else {
       fmt.Printf("When parsing %v: %v\n", string(bytes), err)
     }
-    atomic.AddUint32(queueSize, -1)
+    atomic.AddInt32(queueSize, -1)
   }
 }
 
@@ -118,7 +123,7 @@ func receiveUDP(udpConn *net.UDPConn, ch chan []byte, queueSize *int32) {
   bytes := make([]byte, maxMessageSize)
   read, err := udpConn.Read(bytes)
   for err == nil {
-    atomic.AddUint32(queueSize, 1)
+    atomic.AddInt32(queueSize, 1)
     ch <- bytes[:read]
     bytes = make([]byte, maxMessageSize)
     read, err = udpConn.Read(bytes)
@@ -156,12 +161,11 @@ func getRecommendations(w http.ResponseWriter, r *http.Request, c *client.Conn) 
   for _, obj := range c.Slice(uLikesKey(uid), nil, nil, true, true) {
     likersOp.Sources = append(likersOp.Sources, setop.SetOpSource{Key: oLikesKey(string(obj.Key))})
   }
-  // designate a sub tree to dump the liked objects in
-  dumpkey := []byte(fmt.Sprintf("%v_RECOMMENDED", uid))
-  // make it mirrored
-  c.SubAddConfiguration(dumpkey, "mirrored", "yes")
-  // make sure we clean up after ourselves
-  defer c.SubClear(dumpkey)
+  // Create a set operation that returns the union of all things liked by all likers of objects we liked, returning the sum of the likes for each object
+  objectsOp := &setop.SetOp{
+    Merge: setop.FloatSum,
+    Type:  setop.Union,
+  }
   // For each user in the union of users having liked something we like
   for _, user := range c.SetExpression(setop.SetExpression{
     Op: likersOp,
@@ -174,22 +178,21 @@ func getRecommendations(w http.ResponseWriter, r *http.Request, c *client.Conn) 
       }))
       // And weight the user according to how many commonalities we have
       weight := math.Log(float64(similarity + 1))
-      // For each object the user has liked
-      for _, obj := range c.SetExpression(setop.SetExpression{
-        Code: fmt.Sprintf("(D:First %v %v)", string(uLikesKey(string(user.Key))), string(uLikesKey(uid))),
-      }) {
-        // We add the product of the user weight and the like weight
-        modification := weight * godCommon.MustDecodeFloat64(obj.Values[0])
-        // To any existing weight for this object, or add it as a new weight
-        if previous, existed := c.SubGet(dumpkey, obj.Key); existed {
-          sum := godCommon.MustDecodeFloat64(previous) + modification
-          c.SubPut(dumpkey, obj.Key, godCommon.EncodeFloat64(sum))
-        } else {
-          c.SubPut(dumpkey, obj.Key, godCommon.EncodeFloat64(modification))
-        }
-      }
+      // Add the objects liked by this user, weighed this much, as a source
+      objectsOp.Sources = append(objectsOp.Sources, setop.SetOpSource{Key: uLikesKey(string(user.Key)), Weight: &weight})
     }
   }
+  // designate a sub tree to dump the liked objects in
+  dumpkey := []byte(fmt.Sprintf("%v_RECOMMENDED", uid))
+  // make it mirrored
+  c.SubAddConfiguration(dumpkey, "mirrored", "yes")
+  // make sure we clean up after ourselves
+  defer c.SubClear(dumpkey)
+  // Dump the results in the dump tree
+  c.SetExpression(setop.SetExpression{
+    Op:   objectsOp,
+    Dest: dumpkey,
+  })
   // Finally, fetch the wanted number of recommendations
   var result []common.Message
   for _, item := range c.MirrorReverseSliceLen(dumpkey, nil, true, request.Num) {
