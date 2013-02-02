@@ -10,6 +10,7 @@ import (
   godCommon "github.com/zond/god/common"
   "github.com/zond/god/dhash"
   "github.com/zond/god/setop"
+  "math"
   "net"
   "net/http"
   "runtime"
@@ -34,12 +35,16 @@ var jsonPort = flag.Int("jsonPort", 29192, "Port to listen to for HTTP/JSON reco
 var dir = flag.String("dir", address, "Where to store logfiles and snapshots. Defaults to a directory named after the listening ip/port. The empty string will turn off persistence.")
 var timeout = flag.Int("activationTimeout", 14, "Number of days until views are cleared and objects are automatically destroyed.")
 
-func viewsKey(id string) []byte {
-  return []byte(fmt.Sprintf("%v_VIEWS", id))
+func uViewsKey(id string) []byte {
+  return []byte(fmt.Sprintf("USER_%v_VIEWS", id))
 }
 
-func likesKey(id string) []byte {
-  return []byte(fmt.Sprintf("%v_LIKES", id))
+func uLikesKey(id string) []byte {
+  return []byte(fmt.Sprintf("USER_%v_LIKES", id))
+}
+
+func oLikesKey(id string) []byte {
+  return []byte(fmt.Sprintf("OBJECT_%v_LIKES", id))
 }
 
 func updateRecommendations(c *client.Conn, queueSize *int32) {
@@ -67,7 +72,7 @@ func handleUDP(ch chan []byte, c *client.Conn, queueSize *int32) {
         // Make the object id active
         c.SubPut(activeObjectsKey, []byte(mess.Object), encT)
         // Create a key for the views of this user
-        vKey := viewsKey(mess.User)
+        vKey := uViewsKey(mess.User)
         // Make sure the sub tree is mirrored
         c.SubAddConfiguration(vKey, "mirrored", "yes")
         // Log this view
@@ -84,9 +89,9 @@ func handleUDP(ch chan []byte, c *client.Conn, queueSize *int32) {
         }
       } else if mess.Type == common.Like {
         // Record the liked object under user
-        c.SubPut(likesKey(mess.User), []byte(mess.Object), godCommon.EncodeFloat64(mess.Weight))
+        c.SubPut(uLikesKey(mess.User), []byte(mess.Object), godCommon.EncodeFloat64(mess.Weight))
         // Record the liker under the liked object
-        c.SubPut(likesKey(mess.Object), []byte(mess.User), nil)
+        c.SubPut(oLikesKey(mess.Object), []byte(mess.User), nil)
         if !mess.DontActivate {
           // Make the object id active
           c.SubPut(activeObjectsKey, []byte(mess.Object), nil)
@@ -148,84 +153,8 @@ func getRecommendations(w http.ResponseWriter, r *http.Request, c *client.Conn) 
     Type:  setop.Union,
   }
   // For each object we have liked, add the likers of that flavor as a source to the union of likers
-  for _, obj := range c.Slice(likesKey(uid), nil, nil, true, true) {
-    likersOp.Sources = append(likersOp.Sources, setop.SetOpSource{Key: likesKey(string(obj.Key))})
-  }
-  // Create a set operation that returns the union of the liked objects of all likers of all objects we have liked, returning the sum of the like weights
-  objectsOp := &setop.SetOp{
-    Merge: setop.FloatSum,
-    Type:  setop.Union,
-  }
-  // For each user in the union of users having liked something we like, add the objects they have liked as a source to the union of objects
-  for _, user := range c.SetExpression(setop.SetExpression{
-    Op: likersOp,
-  }) {
-    if string(user.Key) != uid {
-      objectsOp.Sources = append(objectsOp.Sources, setop.SetOpSource{Key: likesKey(string(user.Key))})
-    }
-  }
-  // Filter out whatever the user alread likes
-  objectsOp = &setop.SetOp{
-    Merge: setop.First,
-    Type:  setop.Difference,
-    Sources: []setop.SetOpSource{
-      setop.SetOpSource{
-        SetOp: objectsOp,
-      },
-      setop.SetOpSource{
-        Key: likesKey(uid),
-      },
-    },
-  }
-  // If the request wanted us to do something with the objects already viewed by the user
-  if request.Viewed != "" {
-    var opType setop.SetOpType
-    // Select the appropriate operation
-    if request.Viewed == common.Intersect {
-      opType = setop.Intersection
-    } else if request.Viewed == common.Reject {
-      opType = setop.Difference
-    } else {
-      panic(fmt.Errorf("%v is not a valid value for Viewed", request.Viewed))
-    }
-    // Create a new set operation doing the appropriate thing on the set of recommendations
-    objectsOp = &setop.SetOp{
-      Merge: setop.First,
-      Type:  opType,
-      Sources: []setop.SetOpSource{
-        setop.SetOpSource{
-          SetOp: objectsOp,
-        },
-        setop.SetOpSource{
-          Key: viewsKey(uid),
-        },
-      },
-    }
-  }
-  // If the request wanted us to do something with the active objects
-  if request.Actives != "" {
-    var opType setop.SetOpType
-    // Select the appropriate operation
-    if request.Actives == common.Intersect {
-      opType = setop.Intersection
-    } else if request.Actives == common.Reject {
-      opType = setop.Difference
-    } else {
-      panic(fmt.Errorf("%v is not a valid value for Actives", request.Actives))
-    }
-    // Create a new set operation doing the appropriate thing on the set of recommendations
-    objectsOp = &setop.SetOp{
-      Merge: setop.First,
-      Type:  opType,
-      Sources: []setop.SetOpSource{
-        setop.SetOpSource{
-          SetOp: objectsOp,
-        },
-        setop.SetOpSource{
-          Key: activeObjectsKey,
-        },
-      },
-    }
+  for _, obj := range c.Slice(uLikesKey(uid), nil, nil, true, true) {
+    likersOp.Sources = append(likersOp.Sources, setop.SetOpSource{Key: oLikesKey(string(obj.Key))})
   }
   // designate a sub tree to dump the liked objects in
   dumpkey := []byte(fmt.Sprintf("%v_RECOMMENDED", uid))
@@ -233,10 +162,35 @@ func getRecommendations(w http.ResponseWriter, r *http.Request, c *client.Conn) 
   c.SubAddConfiguration(dumpkey, "mirrored", "yes")
   // make sure we clean up after ourselves
   defer c.SubClear(dumpkey)
-  c.SetExpression(setop.SetExpression{
-    Op:   objectsOp,
-    Dest: dumpkey,
-  })
+  // For each user in the union of users having liked something we like
+  for _, user := range c.SetExpression(setop.SetExpression{
+    Op: likersOp,
+  }) {
+    // If the user is not us
+    if string(user.Key) != uid {
+      // Fetch the number of objects we have both liked
+      similarity := len(c.SetExpression(setop.SetExpression{
+        Code: fmt.Sprintf("(I:First %v %v)", string(uLikesKey(string(user.Key))), string(uLikesKey(uid))),
+      }))
+      // And weight the user according to how many commonalities we have
+      weight := math.Log(float64(similarity + 1))
+      // For each object the user has liked
+      for _, obj := range c.SetExpression(setop.SetExpression{
+        Code: fmt.Sprintf("(D:First %v %v)", string(uLikesKey(string(user.Key))), string(uLikesKey(uid))),
+      }) {
+        // We add the product of the user weight and the like weight
+        modification := weight * godCommon.MustDecodeFloat64(obj.Values[0])
+        // To any existing weight for this object, or add it as a new weight
+        if previous, existed := c.SubGet(dumpkey, obj.Key); existed {
+          sum := godCommon.MustDecodeFloat64(previous) + modification
+          c.SubPut(dumpkey, obj.Key, godCommon.EncodeFloat64(sum))
+        } else {
+          c.SubPut(dumpkey, obj.Key, godCommon.EncodeFloat64(modification))
+        }
+      }
+    }
+  }
+  // Finally, fetch the wanted number of recommendations
   var result []common.Message
   for _, item := range c.MirrorReverseSliceLen(dumpkey, nil, true, request.Num) {
     result = append(result, common.Message{
@@ -252,7 +206,7 @@ func getRecommendations(w http.ResponseWriter, r *http.Request, c *client.Conn) 
 
 func getLikes(w http.ResponseWriter, r *http.Request, c *client.Conn) {
   uid := mux.Vars(r)["user_id"]
-  lKey := likesKey(uid)
+  lKey := uLikesKey(uid)
   var result []common.Message
   for _, item := range c.Slice(lKey, nil, nil, true, true) {
     result = append(result, common.Message{
@@ -270,7 +224,7 @@ func getLikes(w http.ResponseWriter, r *http.Request, c *client.Conn) {
 
 func getViews(w http.ResponseWriter, r *http.Request, c *client.Conn) {
   uid := mux.Vars(r)["user_id"]
-  vKey := viewsKey(uid)
+  vKey := uViewsKey(uid)
   var result []common.Message
   for _, item := range c.Slice(vKey, nil, nil, true, true) {
     result = append(result, common.Message{
