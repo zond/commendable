@@ -48,6 +48,10 @@ func oLikesKey(id string) []byte {
   return []byte(fmt.Sprintf("OBJECT_%v_LIKES", id))
 }
 
+func uRecommendedKey(id string) []byte {
+  return []byte(fmt.Sprintf("USER_%v_RECOMMENDED", id))
+}
+
 func updateRecommendations(c *client.Conn, queueSize *int32) {
   var uidB []byte
   var tsB []byte
@@ -146,12 +150,9 @@ func setupUDPService(c *client.Conn) {
   go updateRecommendations(c, &queueSize)
 }
 
-func getRecommendations(w http.ResponseWriter, r *http.Request, c *client.Conn) {
-  uid := mux.Vars(r)["user_id"]
-  var request common.RecommendationsRequest
-  if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-    panic(err)
-  }
+func refreshRecommendations(c *client.Conn, uid string) {
+  rKey := uRecommendedKey(uid)
+  c.SubClear(rKey)
   // Create a set operation that returns the union of the likers of all objects we have liked, just returning the user key
   likersOp := &setop.SetOp{
     Merge: setop.First,
@@ -159,6 +160,7 @@ func getRecommendations(w http.ResponseWriter, r *http.Request, c *client.Conn) 
   }
   // For each object we have liked, add the likers of that flavor as a source to the union of likers
   for _, obj := range c.Slice(uLikesKey(uid), nil, nil, true, true) {
+    fmt.Printf("%v likes %v, adding its likers\n", uid, string(obj.Key))
     likersOp.Sources = append(likersOp.Sources, setop.SetOpSource{Key: oLikesKey(string(obj.Key))})
   }
   // Create a set operation that returns the union of all things liked by all likers of objects we liked, returning the sum of the likes for each object
@@ -178,19 +180,88 @@ func getRecommendations(w http.ResponseWriter, r *http.Request, c *client.Conn) 
       }))
       // And weight the user according to how many commonalities we have
       weight := math.Log(float64(similarity + 1))
+      fmt.Printf("%v likes %v objects in common with %v, giving it a weight of %v\n", string(user.Key), similarity, uid, weight)
       // Add the objects liked by this user, weighed this much, as a source
       objectsOp.Sources = append(objectsOp.Sources, setop.SetOpSource{Key: uLikesKey(string(user.Key)), Weight: &weight})
     }
   }
-  // designate a sub tree to dump the liked objects in
-  dumpkey := []byte(fmt.Sprintf("%v_RECOMMENDED", uid))
-  // make it mirrored
-  c.SubAddConfiguration(dumpkey, "mirrored", "yes")
-  // make sure we clean up after ourselves
-  defer c.SubClear(dumpkey)
   // Dump the results in the dump tree
   c.SetExpression(setop.SetExpression{
     Op:   objectsOp,
+    Dest: rKey,
+  })
+}
+
+func getRecommendations(w http.ResponseWriter, r *http.Request, c *client.Conn) {
+  uid := mux.Vars(r)["user_id"]
+  var request common.RecommendationsRequest
+  if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+    panic(err)
+  }
+  // Get the key for the recommendations for this user
+  rKey := uRecommendedKey(uid)
+  if c.SubSize(rKey) == 0 {
+    refreshRecommendations(c, uid)
+  }
+  // Create a dump key to store the finished recomendations in
+  dumpkey := []byte(fmt.Sprintf("USER_%v_FILTERED", uid))
+  // make it mirrored
+  c.SubAddConfiguration(dumpkey, "mirrored", "yes")
+  // Create a simple Union of the recommendations
+  recOp := &setop.SetOp{
+    Merge: setop.First,
+    Type:  setop.Union,
+    Sources: []setop.SetOpSource{
+      setop.SetOpSource{
+        Key: rKey,
+      },
+    },
+  }
+  // If we want to filter on active objects
+  if request.Actives != "" {
+    // Create an operation on the simple Union and the active objects
+    recOp = &setop.SetOp{
+      Merge: setop.First,
+      Sources: []setop.SetOpSource{
+        setop.SetOpSource{
+          SetOp: recOp,
+        },
+        setop.SetOpSource{
+          Key: activeObjectsKey,
+        },
+      },
+    }
+    // And make it of the correct type
+    if request.Actives == common.Reject {
+      recOp.Type = setop.Difference
+    } else if request.Actives == common.Intersect {
+      recOp.Type = setop.Intersection
+    }
+  }
+  // If we want to filter on viewed objects
+  if request.Viewed != "" {
+    // Create an operation on the previous operation and the viewed objects
+    recOp = &setop.SetOp{
+      Merge: setop.First,
+      Sources: []setop.SetOpSource{
+        setop.SetOpSource{
+          SetOp: recOp,
+        },
+        setop.SetOpSource{
+          Key: uViewsKey(uid),
+        },
+      },
+    }
+    // And make it of the correct type
+    if request.Viewed == common.Reject {
+      recOp.Type = setop.Difference
+    } else if request.Viewed == common.Intersect {
+      recOp.Type = setop.Intersection
+    }
+  }
+  // Run the expression
+  c.SetExpression(setop.SetExpression{
+    Op:   recOp,
     Dest: dumpkey,
   })
   // Finally, fetch the wanted number of recommendations
