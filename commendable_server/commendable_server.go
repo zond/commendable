@@ -14,6 +14,7 @@ import (
   "net"
   "net/http"
   "runtime"
+  "sort"
   "sync/atomic"
   "time"
 )
@@ -25,7 +26,6 @@ const (
 )
 
 var activeObjectsKey = []byte("COMMENDABLE_ACTIVE_OBJECTS")
-var changedUsersKey = []byte("COMMENDABLE_CHANGED_USERS")
 
 var ip = flag.String("ip", "127.0.0.1", "IP address to listen to.")
 var port = flag.Int("port", 9191, "Port to listen to for cluster net/rpc connections. The next port will be used for the database admin HTTP service.")
@@ -46,26 +46,6 @@ func uLikesKey(id string) []byte {
 
 func oLikesKey(id string) []byte {
   return []byte(fmt.Sprintf("OBJECT_%v_LIKES", id))
-}
-
-func uRecommendedKey(id string) []byte {
-  return []byte(fmt.Sprintf("USER_%v_RECOMMENDED", id))
-}
-
-func updateRecommendations(c *client.Conn, queueSize *int32) {
-  var uidB []byte
-  var tsB []byte
-  var existed bool
-  for {
-    for atomic.LoadInt32(queueSize) > 0 || c.SubSize(changedUsersKey) == 0 {
-      time.Sleep(time.Second)
-    }
-    tsB, uidB, existed = c.First(changedUsersKey)
-    if existed {
-      fmt.Println("updating the recommendations for", string(uidB))
-      c.SubDel(changedUsersKey, tsB)
-    }
-  }
 }
 
 func handleUDP(ch chan []byte, c *client.Conn, queueSize *int32) {
@@ -111,7 +91,6 @@ func handleUDP(ch chan []byte, c *client.Conn, queueSize *int32) {
         for _, item := range c.MirrorSlice(activeObjectsKey, nil, godCommon.EncodeInt64(tooOld), true, true) {
           c.SubDel(activeObjectsKey, item.Value)
         }
-        c.SubPut(changedUsersKey, godCommon.EncodeInt64(time.Now().UnixNano()), []byte(mess.User))
       } else if mess.Type == common.Deactivate {
         // Remote the object id from the active objects
         c.SubDel(activeObjectsKey, []byte(mess.Object))
@@ -147,12 +126,14 @@ func setupUDPService(c *client.Conn) {
   var queueSize int32
   go receiveUDP(udpConn, ch, &queueSize)
   go handleUDP(ch, c, &queueSize)
-  go updateRecommendations(c, &queueSize)
 }
 
-func refreshRecommendations(c *client.Conn, uid string) {
-  rKey := uRecommendedKey(uid)
-  c.SubClear(rKey)
+func getRecommendations(w http.ResponseWriter, r *http.Request, c *client.Conn) {
+  uid := mux.Vars(r)["user_id"]
+  var request common.RecommendationsRequest
+  if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+    panic(err)
+  }
   // Create a set operation that returns the union of the likers of all objects we have liked, just returning the user key
   likersOp := &setop.SetOp{
     Merge: setop.First,
@@ -160,7 +141,6 @@ func refreshRecommendations(c *client.Conn, uid string) {
   }
   // For each object we have liked, add the likers of that flavor as a source to the union of likers
   for _, obj := range c.Slice(uLikesKey(uid), nil, nil, true, true) {
-    fmt.Printf("%v likes %v, adding its likers\n", uid, string(obj.Key))
     likersOp.Sources = append(likersOp.Sources, setop.SetOpSource{Key: oLikesKey(string(obj.Key))})
   }
   // Create a set operation that returns the union of all things liked by all likers of objects we liked, returning the sum of the likes for each object
@@ -180,51 +160,18 @@ func refreshRecommendations(c *client.Conn, uid string) {
       }))
       // And weight the user according to how many commonalities we have
       weight := math.Log(float64(similarity + 1))
-      fmt.Printf("%v likes %v objects in common with %v, giving it a weight of %v\n", string(user.Key), similarity, uid, weight)
       // Add the objects liked by this user, weighed this much, as a source
       objectsOp.Sources = append(objectsOp.Sources, setop.SetOpSource{Key: uLikesKey(string(user.Key)), Weight: &weight})
     }
   }
-  // Dump the results in the dump tree
-  c.SetExpression(setop.SetExpression{
-    Op:   objectsOp,
-    Dest: rKey,
-  })
-}
-
-func getRecommendations(w http.ResponseWriter, r *http.Request, c *client.Conn) {
-  uid := mux.Vars(r)["user_id"]
-  var request common.RecommendationsRequest
-  if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-    panic(err)
-  }
-  // Get the key for the recommendations for this user
-  rKey := uRecommendedKey(uid)
-  if c.SubSize(rKey) == 0 {
-    refreshRecommendations(c, uid)
-  }
-  // Create a dump key to store the finished recomendations in
-  dumpkey := []byte(fmt.Sprintf("USER_%v_FILTERED", uid))
-  // make it mirrored
-  c.SubAddConfiguration(dumpkey, "mirrored", "yes")
-  // Create a simple Union of the recommendations
-  recOp := &setop.SetOp{
-    Merge: setop.First,
-    Type:  setop.Union,
-    Sources: []setop.SetOpSource{
-      setop.SetOpSource{
-        Key: rKey,
-      },
-    },
-  }
   // If we want to filter on active objects
   if request.Actives != "" {
     // Create an operation on the simple Union and the active objects
-    recOp = &setop.SetOp{
+    objectsOp = &setop.SetOp{
       Merge: setop.First,
       Sources: []setop.SetOpSource{
         setop.SetOpSource{
-          SetOp: recOp,
+          SetOp: objectsOp,
         },
         setop.SetOpSource{
           Key: activeObjectsKey,
@@ -233,19 +180,19 @@ func getRecommendations(w http.ResponseWriter, r *http.Request, c *client.Conn) 
     }
     // And make it of the correct type
     if request.Actives == common.Reject {
-      recOp.Type = setop.Difference
+      objectsOp.Type = setop.Difference
     } else if request.Actives == common.Intersect {
-      recOp.Type = setop.Intersection
+      objectsOp.Type = setop.Intersection
     }
   }
   // If we want to filter on viewed objects
   if request.Viewed != "" {
     // Create an operation on the previous operation and the viewed objects
-    recOp = &setop.SetOp{
+    objectsOp = &setop.SetOp{
       Merge: setop.First,
       Sources: []setop.SetOpSource{
         setop.SetOpSource{
-          SetOp: recOp,
+          SetOp: objectsOp,
         },
         setop.SetOpSource{
           Key: uViewsKey(uid),
@@ -254,23 +201,47 @@ func getRecommendations(w http.ResponseWriter, r *http.Request, c *client.Conn) 
     }
     // And make it of the correct type
     if request.Viewed == common.Reject {
-      recOp.Type = setop.Difference
+      objectsOp.Type = setop.Difference
     } else if request.Viewed == common.Intersect {
-      recOp.Type = setop.Intersection
+      objectsOp.Type = setop.Intersection
     }
   }
-  // Run the expression
-  c.SetExpression(setop.SetExpression{
-    Op:   recOp,
-    Dest: dumpkey,
-  })
   // Finally, fetch the wanted number of recommendations
   var result []common.Message
-  for _, item := range c.MirrorReverseSliceLen(dumpkey, nil, true, request.Num) {
-    result = append(result, common.Message{
-      Object: string(item.Value),
-      Weight: godCommon.MustDecodeFloat64(item.Key),
+  for _, item := range c.SetExpression(setop.SetExpression{
+    Op: objectsOp,
+  }) {
+    w := godCommon.MustDecodeFloat64(item.Values[0])
+    i := sort.Search(len(result), func(i int) bool {
+      return w > result[i].Weight
     })
+    if i < len(result) {
+      if len(result) < request.Num {
+        result = append(result[:i], append([]common.Message{common.Message{
+          Object: string(item.Key),
+          Weight: w,
+        }}, result[i:]...)...)
+      } else {
+        if i > 0 {
+          result = append(result[:i], append([]common.Message{common.Message{
+            Object: string(item.Key),
+            Weight: w,
+          }}, result[i:len(result)-1]...)...)
+        } else {
+          result = append([]common.Message{common.Message{
+            Object: string(item.Key),
+            Weight: w,
+          }}, result[i:len(result)-1]...)
+        }
+      }
+    } else {
+      if len(result) < request.Num {
+        result = append(result, common.Message{
+          Object: string(item.Key),
+          Weight: w,
+        })
+      }
+    }
   }
   w.Header().Set("Content-Type", "application/json; charset=UTF-8")
   if err := json.NewEncoder(w).Encode(result); err != nil {
