@@ -27,7 +27,8 @@ const (
 
 var activeObjectsKey = []byte("COMMENDABLE_ACTIVE_OBJECTS")
 
-var ip = flag.String("ip", "127.0.0.1", "IP address to listen to.")
+var listenIp = flag.String("listenIp", "127.0.0.1", "IP address to listen at.")
+var broadcastIp = flag.String("broadcastIp", "127.0.0.1", "IP address to broadcast to the cluster.")
 var port = flag.Int("port", 9191, "Port to listen to for cluster net/rpc connections. The next port will be used for the database admin HTTP service.")
 var joinIp = flag.String("joinIp", "", "IP address of a node in a cluster to join.")
 var joinPort = flag.Int("joinPort", 9191, "Port of a node in a cluster to join.")
@@ -114,7 +115,7 @@ func receiveUDP(udpConn *net.UDPConn, ch chan []byte, queueSize *int32) {
 }
 
 func setupUDPService(c *client.Conn) {
-  udpAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%v:%v", *ip, *udpPort))
+  udpAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%v:%v", *listenIp, *udpPort))
   if err != nil {
     panic(err)
   }
@@ -298,7 +299,7 @@ func getActives(w http.ResponseWriter, r *http.Request, c *client.Conn) {
 }
 
 func setupJSONService(c *client.Conn) {
-  tcpConn, err := net.Listen("tcp", fmt.Sprintf("%v:%v", *ip, *jsonPort))
+  tcpConn, err := net.Listen("tcp", fmt.Sprintf("%v:%v", *listenIp, *jsonPort))
   if err != nil {
     panic(err)
   }
@@ -324,9 +325,9 @@ func main() {
   runtime.GOMAXPROCS(runtime.NumCPU())
   flag.Parse()
   if *dir == address {
-    *dir = fmt.Sprintf("%v:%v", *ip, *port)
+    *dir = fmt.Sprintf("%v:%v", *broadcastIp, *port)
   }
-  s := dhash.NewNodeDir(fmt.Sprintf("%v:%v", *ip, *port), *dir)
+  s := dhash.NewNodeDir(fmt.Sprintf("%v:%v", *listenIp, *port), fmt.Sprintf("%v:%v", *broadcastIp, *port), *dir)
   s.MustStart()
   if *joinIp != "" {
     s.MustJoin(fmt.Sprintf("%v:%v", *joinIp, *joinPort))
