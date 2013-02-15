@@ -56,7 +56,7 @@ Send UDP messages looking like
       "Weight": WEIGHT,
     }
 
-to the `-udpPort=PORT` port.
+to the `-udpPort=PORT` port. The object will also be considered active until `-timeout=DAYS` have passed, or it gets deactivated.
 
 # View stuff
 
@@ -68,7 +68,7 @@ Send UDP messages looking like
       "Object": OBJECTID,
     }
 
-to the `-udpPort=PORT` port.
+to the `-udpPort=PORT` port. The object will also be considered active until `-timeout=DAYS` have passed, or it gets deactivated.
 
 # Deactivate stuff
 
@@ -83,5 +83,19 @@ to the `-udpPort=PORT` port.
 
 # Get recommendations
 
-`GET /recommend/USERID` from the `-jsonPort=PORT`
+`POST /recommend/USERID` messages looking like
+
+    {
+      "Num": WANTED_NUMBER_OF_RECOMMENDATIONS
+      "Actives": "reject" or "intersect" or not at all,
+      "Viewed": "reject" or "intersect" or not at all,
+    }
+
+to the `-jsonPort=PORT`. 
+
+Rejecting Actives will show only non active objects. 
+Intersecting Actives will show only active objects. 
+
+Rejecting Viewed will show only objects not viewed by the user.
+Intersecting Viewed will show only objects viewed by the user.
 
