@@ -333,7 +333,7 @@ func main() {
     s.MustJoin(fmt.Sprintf("%v:%v", *joinIp, *joinPort))
   }
 
-  c := client.MustConn(s.GetAddr())
+  c := client.MustConn(s.GetListenAddr())
   c.Start()
 
   setupUDPService(c)
