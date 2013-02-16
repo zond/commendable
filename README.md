@@ -19,15 +19,15 @@ Run `go get github.com/zond/commendable/commendable_server`
 
 ## Start options
 
-* `-listenIp=ADDRESS`: The ip address to listen to requests at.
-* `-broadcastIp=ADDRESS`: The ip address to advertise to the cluster.
-* `-port=PORT`: The port to use when talking to the cluster.
-* `-joinIp=ADDRESS`: The address to contact to join the cluster.
-* `-joinPort=PORT`: The port to contact to join the cluster.
-* `-udpPort=PORT`: The port to listen for UDP messages at.
-* `-jsonPort=PORT`: The port to listen for JSON HTTP requests at.
-* `-dir=DIR`: The directory to look for and store the persistence files in.
-* `-timeout=DAYS`: The number of days before active objects get automatically deactivated.
+* `-listenIp=ADDRESS`: The ip address to listen to requests at, defaults to `127.0.0.1`.
+* `-broadcastIp=ADDRESS`: The ip address to advertise to the cluster, defaults to `127.0.0.1`.
+* `-port=PORT`: The port to use when talking to the cluster, defaults to `9191`.
+* `-joinIp=ADDRESS`: The address to contact to join the cluster, no default.
+* `-joinPort=PORT`: The port to contact to join the cluster, defaults to `9191`.
+* `-udpPort=PORT`: The port to listen for UDP messages at, defaults to `29191`.
+* `-jsonPort=PORT`: The port to listen for JSON HTTP requests at, defaults to `29192`.
+* `-dir=DIR`: The directory to look for and store the persistence files in, defaults to `127.0.0.1:9191`.
+* `-timeout=DAYS`: The number of days before active objects get automatically deactivated, defaults to `14`.
 
 # Seed your database
 
