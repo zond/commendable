@@ -1,7 +1,7 @@
 commendable
 ===========
 
-A recommendation engine.
+A recommendation engine based on an embedded https://github.com/zond/god
 
 It opens up a port listening for JSON encoded UDP messages containing mutating commands. 
 
